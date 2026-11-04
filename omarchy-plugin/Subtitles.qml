@@ -185,42 +185,58 @@ Item {
         implicitHeight: (originalLabel.visible ? originalLabel.implicitHeight + Style.space(4) : 0)
           + label.implicitHeight + Style.space(16)
 
-        Column {
-          id: column
-          anchors.verticalCenter: parent.verticalCenter
-          x: (parent.width - width) / 2
-          spacing: Style.space(4)
-          // Left→right progressive reveal: the column is clipped to a
-          // fraction of the card width driven by the animation (1.0 = all).
-          clip: window.revealProgress < 1.0
-          width: parent.width * Math.max(0.001, window.revealProgress)
+        // Reveal holder: text laid out at FULL width from the first frame
+        // (no re-wrap "squeezing"); the wipe is a card-colored "curtain"
+        // rectangle shrinking leftward as the reveal progresses.
+        Item {
+          id: revealHolder
+          width: parent.width
           height: parent.implicitHeight - Style.space(16)
+          anchors.verticalCenter: parent.verticalCenter
+          readonly property real cut: width * Math.max(0.001, window.revealProgress)
 
-          Text {
-            id: originalLabel
-            visible: root.originalVisible
-            textFormat: Text.PlainText
-            text: root.original
-            color: Color.notifications.text
-            opacity: 0.65
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            font.italic: true
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-            width: Math.min(implicitWidth, card.maxTextWidth)
+          Column {
+            id: column
+            anchors.horizontalCenter: parent.horizontalCenter
+            spacing: Style.space(4)
+
+            Text {
+              id: originalLabel
+              visible: root.originalVisible
+              textFormat: Text.PlainText
+              text: root.original
+              color: Color.notifications.text
+              opacity: 0.65
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              font.italic: true
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              width: Math.min(implicitWidth, card.maxTextWidth)
+            }
+
+            Text {
+              id: label
+              textFormat: Text.PlainText
+              text: root.subtitle
+              color: Color.notifications.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.heading
+              horizontalAlignment: Text.AlignHCenter
+              wrapMode: Text.WrapAtWordBoundaryOrAnywhere
+              width: Math.min(implicitWidth, card.maxTextWidth)
+            }
           }
 
-          Text {
-            id: label
-            textFormat: Text.PlainText
-            text: root.subtitle
-            color: Color.notifications.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.heading
-            horizontalAlignment: Text.AlignHCenter
-            wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-            width: Math.min(implicitWidth, card.maxTextWidth)
+          // Curtain over the not-yet-revealed part (card-colored so it blends
+          // with the card background), shrinking leftward as the wipe moves.
+          Rectangle {
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            x: revealHolder.cut
+            width: parent.width - revealHolder.cut + 2
+            color: card.color
+            visible: window.revealProgress < 1.0
           }
         }
 
@@ -228,9 +244,8 @@ Item {
         Behavior on implicitHeight { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
       }
 
-      // Progressive text reveal: a left→right wipe over the whole card.
-      // Both labels sit inside a clipped holder whose width follows the
-      // animation progress; restarts on every new line.
+      // Progressive text reveal: a card-colored curtain slides off rightward,
+      // uncovering the text left→right. Soft ease, replays on every new line.
       property real revealProgress: 1.0
       SequentialAnimation on revealProgress {
         id: revealAnim
@@ -238,8 +253,8 @@ Item {
         NumberAnimation {
           from: 0.0
           to: 1.0
-          duration: 380
-          easing.type: Easing.OutCubic
+          duration: 700
+          easing.type: Easing.InOutSine
         }
       }
       onVisibleChanged: if (window.visible) revealAnim.restart()
