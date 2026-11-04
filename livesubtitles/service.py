@@ -133,6 +133,41 @@ def _tail(text: str, limit: int = MAX_LINE_CHARS) -> str:
     return cut[cut.find(" ") + 1 :].strip() if " " in cut else cut
 
 
+def _append(prev: str, chunk: str) -> str:
+    """Append a freshly transcribed tail to the accumulated line, collapsing
+    whisper's repetition artifacts. Short tails re-record the same audio as
+    the previous tail's ending; if the chunk echoes what we already have
+    (e.g. "You" after "…you"), skip it instead of stacking "youYouYeah"."""
+    chunk = chunk.strip()
+    if not chunk:
+        return _tail(prev)
+    prev = prev.strip()
+    if not prev:
+        return _tail(chunk)
+    # Case-insensitive overlap: if the chunk is a suffix of the accumulated
+    # text (or vice versa), don't duplicate it.
+    pl, cl = prev.lower(), chunk.lower()
+    if pl.endswith(cl) or cl.endswith(pl):
+        longer = prev if len(prev) >= len(chunk) else chunk
+        return _tail(longer)
+    # The chunk may repeat the tail end of prev with extra words appended
+    # ("…on the mat" after prev ending "…on the"): merge the overlap.
+    words_p = pl.split()
+    words_c = cl.split()
+    overlap = 0
+    max_ov = min(len(words_p), len(words_c))
+    for k in range(max_ov, 0, -1):
+        if words_p[-k:] == words_c[:k]:
+            overlap = k
+            break
+    if overlap and overlap < len(words_c):
+        merged = prev + " " + " ".join(chunk.split()[overlap:])
+        return _tail(merged)
+    if overlap and overlap == len(words_c):
+        return _tail(prev)  # nothing new
+    return _tail(prev + " " + chunk)
+
+
 def publish_original(text: str) -> None:
     global last_subtitle_at
     last_subtitle_at = time.monotonic()
@@ -466,6 +501,11 @@ class Transcriber:
             # same result.
             vad_filter=False,
             condition_on_previous_text=False,
+            # Without VAD, whisper on a sub-second clip tends to hallucinate
+            # stock phrases ("You", "Thank you."). Reject low-confidence
+            # segments instead of printing them.
+            no_speech_threshold=0.6,
+            log_prob_threshold=-1.0,
         )
         text = " ".join(s.text.strip() for s in segments if s.text.strip())
         detected = info.language or "en"
@@ -600,15 +640,15 @@ class Pipeline(threading.Thread):
                     continue
                 source = forced or detected
                 # Original goes out first — no translation step on its path.
-                # Long runs (credit rolls, songs) grow without bound: keep
-                # only the tail so the overlay stays readable.
-                self.last_original = _tail((self.last_original + text).strip())
+                # _append collapses whisper repetition artifacts instead of
+                # stacking "youYouYeah" from overlapping tails.
+                self.last_original = _append(self.last_original, text)
                 publish_original(self.last_original)
                 if partial:
                     # Interim line: confirmed words + the fresh tail. The
                     # accumulated text is now "final" — the next partial
                     # appends to it, nothing is ever re-transcribed.
-                    self.last_final = _tail((self.last_final + text).strip())
+                    self.last_final = _append(self.last_final, text)
                     self.tr_worker.submit(self.last_final, source, target)
                     continue
                 # Pause confirmed the tail: the accumulated line is complete.
