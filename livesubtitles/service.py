@@ -43,8 +43,13 @@ NOISE_FLOOR = float(os.environ.get("LS_NOISE_FLOOR", "60"))
 HANGOVER_FRAMES = 5  # 500 ms of silence closes an utterance
 MAX_UTTERANCE_FRAMES = 80  # hard cap, 8 s — longer speech becomes sequential lines
 PARTIAL_EVERY_FRAMES = 10  # default refresh cadence, overridden by speed profile
-SUBTITLE_TTL = 4.0  # hide the line after this many seconds without updates
+SUBTITLE_TTL = 4.0  # base hide delay; the overlay adds reading time per char
 MAX_LINES = 2
+# Reading-time model used by the QML overlay: base delay + bonus per
+# character of the shown text, capped. A 40-char line lingers ~5.6 s after
+# the last update, a long line up to ~10 s — enough to actually read it.
+TTL_PER_CHAR = 0.04
+TTL_MAX = 10.0
 
 # Speed profiles: how much CPU is traded for lower latency. "beam" is the
 # whisper beam size (1 = greedy, 2-3 = better accuracy on noisy audio) and
@@ -94,6 +99,9 @@ class State:
             "show_original": False,
             "speed": "balanced",
             "opacity": 1.0,
+            "ttl_base": SUBTITLE_TTL,
+            "ttl_per_char": TTL_PER_CHAR,
+            "ttl_max": TTL_MAX,
             "pid": os.getpid(),
         }
         self._flush()

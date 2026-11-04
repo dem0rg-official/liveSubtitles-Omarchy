@@ -24,6 +24,34 @@ Item {
   property real opacitySetting: 1.0
   property string subtitle: ""
   property string original: ""
+  // Reading-time model (mirrors service.py constants; state.json overrides).
+  property real ttlBase: 4.0
+  property real ttlPerChar: 0.04
+  property real ttlMax: 10.0
+  // Overlay-side expiry: clears stale text after base + per-char reading
+  // time, so longer lines linger longer instead of vanishing too fast.
+  property real lastUpdate: 0
+  Timer {
+    id: expireTimer
+    interval: 500
+    running: root.enabled
+    repeat: true
+    onTriggered: {
+      if (root.subtitle === "" && root.original === "") return
+      var n = Math.max(root.subtitle.length, root.original.length)
+      var ttl = Math.min(root.ttlMax, root.ttlBase + n * root.ttlPerChar)
+      if (root.lastUpdate > 0 && (Date.now() - root.lastUpdate) > ttl * 1000) {
+        root.subtitle = ""
+        root.original = ""
+        root.lastUpdate = 0
+      }
+    }
+  }
+  onSubtitleChanged: {
+    lastUpdate = Date.now()
+    if (subtitle !== "") revealAnim.restart()
+  }
+  onOriginalChanged: lastUpdate = Date.now()
 
   function applyState(raw) {
     try {
@@ -32,6 +60,9 @@ Item {
       root.showOriginal = p.show_original === true
       var op = Number(p.opacity)
       root.opacitySetting = isFinite(op) && op > 0 ? Math.min(1.0, Math.max(0.2, op)) : 1.0
+      if (isFinite(Number(p.ttl_base))) root.ttlBase = Number(p.ttl_base)
+      if (isFinite(Number(p.ttl_per_char))) root.ttlPerChar = Number(p.ttl_per_char)
+      if (isFinite(Number(p.ttl_max))) root.ttlMax = Number(p.ttl_max)
     } catch (e) {
       root.enabled = false
     }
@@ -117,10 +148,13 @@ Item {
 
       anchors { top: true; bottom: true; left: true; right: true }
 
-      // Click-through everywhere except the subtitle card itself.
-      mask: Region { item: card }
+      // Fully click-through: subtitles are read-only, anything underneath
+      // (buttons, links, videos) stays interactive.
+      mask: Region {}
 
       readonly property real bottomMargin: Style.gapsOut + Style.space(24)
+      // Same breathing room on the sides as at the bottom.
+      readonly property real sideMargin: bottomMargin
 
       BorderSurface {
         id: card
@@ -138,18 +172,29 @@ Item {
           "notifications", "border",
           Color.notifications.border, Color.notifications.border, 1)
 
+        // Longest width the text may occupy: window minus side margins
+        // (minus card padding, handled by the width math below).
+        readonly property real maxTextWidth: Math.max(
+          Style.space(120), window.width - 2 * window.sideMargin - Style.space(28))
+
         implicitWidth: Math.min(
           Math.max(
             originalLabel.visible ? originalLabel.implicitWidth : 0,
             label.implicitWidth) + Style.space(28),
-          window.width - Style.space(48))
+          maxTextWidth + Style.space(28))
         implicitHeight: (originalLabel.visible ? originalLabel.implicitHeight + Style.space(4) : 0)
           + label.implicitHeight + Style.space(16)
 
         Column {
           id: column
-          anchors.centerIn: parent
+          anchors.verticalCenter: parent.verticalCenter
+          x: (parent.width - width) / 2
           spacing: Style.space(4)
+          // Left→right progressive reveal: the column is clipped to a
+          // fraction of the card width driven by the animation (1.0 = all).
+          clip: window.revealProgress < 1.0
+          width: parent.width * Math.max(0.001, window.revealProgress)
+          height: parent.implicitHeight - Style.space(16)
 
           Text {
             id: originalLabel
@@ -163,7 +208,7 @@ Item {
             font.italic: true
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-            width: Math.min(implicitWidth, Style.space(560))
+            width: Math.min(implicitWidth, card.maxTextWidth)
           }
 
           Text {
@@ -175,13 +220,29 @@ Item {
             font.pixelSize: Style.font.heading
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WrapAtWordBoundaryOrAnywhere
-            width: Math.min(implicitWidth, Style.space(560))
+            width: Math.min(implicitWidth, card.maxTextWidth)
           }
         }
 
         Behavior on implicitWidth { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
         Behavior on implicitHeight { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
       }
+
+      // Progressive text reveal: a left→right wipe over the whole card.
+      // Both labels sit inside a clipped holder whose width follows the
+      // animation progress; restarts on every new line.
+      property real revealProgress: 1.0
+      SequentialAnimation on revealProgress {
+        id: revealAnim
+        running: false
+        NumberAnimation {
+          from: 0.0
+          to: 1.0
+          duration: 380
+          easing.type: Easing.OutCubic
+        }
+      }
+      onVisibleChanged: if (window.visible) revealAnim.restart()
     }
   }
 }
