@@ -652,7 +652,13 @@ class Service:
             return
         with self.cfg_lock:
             partial_every = SPEED_PROFILES[self.cfg["speed"]]["partial_every"]
-        stream_live = self.pipeline.use_streaming()
+            source_cfg = self.cfg["source"]
+        # Live frames are only consumed when the source is explicitly "en"
+        # (the streaming model is English-only). Otherwise whisper must
+        # receive the chunks — enabling stream_live with source=auto would
+        # route every speech frame to a decoder that drops them, producing
+        # nothing at all.
+        stream_live = self.pipeline.use_streaming() and source_cfg == "en"
         if stream_live:
             log("streaming engine active — live hypothesis while speaking")
         # Re-detect the spoken language for every capture session: pinning it
@@ -749,6 +755,11 @@ class Service:
             self.cfg["source"] = source
             save_config(self.cfg)
         log(f"source language={source}")
+        # Capture mode depends on the source (live streaming only for en):
+        # restart it so the routing change takes effect immediately.
+        if self.cfg["enabled"]:
+            self.stop_capture()
+            self.start_capture()
 
     def handle(self, line: str) -> None:
         parts = line.strip().split(None, 1)
