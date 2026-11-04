@@ -251,12 +251,8 @@ class Capture(threading.Thread):
                 self.halt.wait(2)
 
     def _pump(self) -> None:
-        # tail: speech audio not yet handed to whisper at all. Both interim
-        # refreshes and the pause-final pass transcribe ONLY this tail —
-        # ~0.6-1 s of audio, constant cost — so transcription always outruns
-        # speech and no backlog ever builds up. The pipeline accumulates the
-        # confirmed text in last_final/last_original instead.
-        tail: list[bytes] = []
+        window: list[bytes] = []  # full utterance, for the accurate final pass
+        tail: list[bytes] = []  # audio since the last partial refresh
         speech = 0
         hangover = 0
         since_partial = 0
@@ -275,69 +271,38 @@ class Capture(threading.Thread):
                 continue  # digital silence before any real audio
             self.seen_loud = True
             if level > SILENCE_RMS:
+                window.append(frame)
                 tail.append(frame)
                 speech += 1
                 hangover = 0
                 since_partial += 1
                 if self.stream_live:
                     # Gboard-style: every speech frame goes to the streaming
-                    # decoder; whisper is not involved while speaking.
+                    # decoder; no tail re-transcription needed at all.
                     self.sink.put(("stream", frame))
+                    if speech >= MAX_UTTERANCE_FRAMES:
+                        self.sink.put(("chunk", b"".join(window), False))
+                        window, speech = [], 0
                     continue
-                # Interim refresh while the sentence is still being spoken:
-                # transcribe only the new tail (~1 s, cheap), the pipeline
-                # appends the confirmed words to the growing interim line.
+                # Interim refresh while the sentence is still being spoken: only
+                # the new ~1 s tail is transcribed (cheap, constant-cost), the
+                # pipeline appends it to the growing interim line.
                 if since_partial >= self.partial_every or speech >= MAX_UTTERANCE_FRAMES:
                     self.sink.put(("chunk", b"".join(tail), True))
                     tail, since_partial = [], 0
-                    speech = min(speech, MAX_UTTERANCE_FRAMES)
+                    if speech >= MAX_UTTERANCE_FRAMES:
+                        self.sink.put(("chunk", b"".join(window), False))
+                        window, speech = [], 0
             elif speech:
+                window.append(frame)
                 hangover += 1
-                tail.append(frame)
                 if hangover >= HANGOVER_FRAMES:
-                    # Pause: confirm the last tail only — never re-transcribe
-                    # the whole utterance (that pass took seconds and stalled
-                    # the pipeline behind live speech).
-                    self.sink.put(("chunk", b"".join(tail), False))
-                    tail, speech, hangover, since_partial = [], 0, 0, 0
+                    self.sink.put(("chunk", b"".join(window), False))
+                    window, tail, speech, hangover = [], [], 0, 0
+                    since_partial = 0
 
 
 # ------------------------------------------------------------------ pipeline
-
-class TranslationWorker(threading.Thread):
-    """Translates the newest submitted line OFF the pipeline thread: the
-    original goes out immediately, the translation lands whenever Argos is
-    done — it never blocks the live hypothesis."""
-
-    def __init__(self, translator: "Translator", pipeline: "Pipeline") -> None:
-        super().__init__(daemon=True, name="Translate")
-        self.translator = translator
-        self.pipeline = pipeline
-        self._cv = threading.Condition()
-        self._job: tuple[str, str, str] | None = None
-
-    def submit(self, text: str, source: str, target: str) -> None:
-        with self._cv:
-            self._job = (text, source, target)
-            self._cv.notify()
-
-    def run(self) -> None:
-        while True:
-            with self._cv:
-                while self._job is None:
-                    self._cv.wait()
-                text, source, target = self._job
-                self._job = None
-            try:
-                out = self.translator.translate(text, source, target)
-            except Exception as e:
-                log(f"translate failed ({source}->{target}): {e}")
-                out = text  # never lose the transcript to a missing model
-            with self.pipeline.cfg_lock:
-                if not self.pipeline.cfg["enabled"]:
-                    continue
-            publish_subtitle(out)
-
 
 class StreamingASR:
     """sherpa-onnx online zipformer: decode audio as it arrives, keep a live
@@ -347,7 +312,6 @@ class StreamingASR:
         self.recognizer = None
         self.stream = None
         self.tail_words = ""  # hypothesis text not yet confirmed by a pause
-        self.spoke = False  # produced at least one word this utterance
         self._lock = threading.Lock()
 
     def available(self) -> bool:
@@ -381,14 +345,8 @@ class StreamingASR:
     def reset(self) -> None:
         with self._lock:
             self.tail_words = ""
-            self.spoke = False
             if self.recognizer is not None and self.stream is not None:
                 self.stream = self.recognizer.create_stream()
-
-    def saw_speech(self) -> bool:
-        """True if the streaming engine produced words for the current line —
-        the whisper final pass then has nothing to add."""
-        return self.spoke
 
     def feed(self, pcm: bytes) -> str:
         """Feed a 100 ms s16le frame, return the current hypothesis text."""
@@ -404,7 +362,6 @@ class StreamingASR:
             text = self.recognizer.get_result(self.stream).strip()
             if text:
                 self.tail_words = text
-                self.spoke = True
             return self.tail_words
 
 
@@ -502,8 +459,6 @@ class Pipeline(threading.Thread):
         self.transcriber = Transcriber()
         self.streaming = StreamingASR()
         self.translator = Translator()
-        self.tr_worker = TranslationWorker(self.translator, self)
-        self.tr_worker.start()
         self.last_final = ""  # finalized text of the current utterance
         self.last_original = ""  # original text accumulated for the same span
         self._last_tr = 0.0  # last translation publish of the live hypothesis
@@ -511,6 +466,19 @@ class Pipeline(threading.Thread):
     def use_streaming(self) -> bool:
         return self.streaming.available()
 
+    def _publish_live(self, original: str, target: str, source: str) -> None:
+        """Publish the live hypothesis: original immediately, translation
+        throttled (Argos on every 100 ms tick would burn CPU)."""
+        publish_original(original)
+        now = time.monotonic()
+        if now - self._last_tr < STREAM_TRANSLATE_EVERY:
+            return
+        self._last_tr = now
+        try:
+            out = self.translator.translate(original, source, target)
+        except Exception:
+            out = original
+        publish_subtitle(out)
 
     def run(self) -> None:
         while True:
@@ -546,17 +514,9 @@ class Pipeline(threading.Thread):
                         self.last_final = ""
                         self.last_original = ""
                         continue
-                # When the streaming engine is live (explicit en source), it
-                # already showed the words as they were spoken; a pause just
-                # closes the line — no heavy whisper pass that would freeze
-                # the pipeline for seconds.
-                if not partial and self.streaming.saw_speech():
-                    self.streaming.reset()
-                    self.last_final = ""
-                    self.last_original = ""
-                    self._last_tr = 0.0
-                    continue
                 if not partial:
+                    # A pause confirmed the utterance: the accurate whisper pass
+                    # replaces the live streaming hypothesis line.
                     self.streaming.reset()
                 with self.cfg_lock:
                     target = self.cfg["language"]
@@ -579,18 +539,28 @@ class Pipeline(threading.Thread):
                 source = forced or detected
                 # Original goes out first — no translation step on its path.
                 publish_original((self.last_original + text).strip())
-                self.last_original = (self.last_original + text).strip() + " "
                 if partial:
-                    # Interim line: confirmed words + the fresh tail. The
-                    # accumulated text is now "final" — the next partial
-                    # appends to it, nothing is ever re-transcribed.
-                    self.last_final = (self.last_final + text).strip() + " "
-                    self.tr_worker.submit(self.last_final.strip(), source, target)
+                    # Interim line: last finalized chunk + live tail, translated
+                    # too so words appear in the target language immediately.
+                    # The tail may cut a word in half — the final pass over the
+                    # full utterance replaces the line with the accurate text.
+                    tail = text
+                    try:
+                        tail = self.translator.translate(text, source, target)
+                    except Exception:
+                        pass
+                    publish_subtitle(self.last_final + tail)
                     continue
-                # Pause confirmed the tail: the accumulated line is complete.
-                line = self.last_final.strip()
-                log(f"heard[{source}]: {line[:100]}")
-                self.tr_worker.submit(line, source, target)
+                self.last_original = ""
+                self.last_final = (self.last_final + text).strip() + " "
+                log(f"heard[{source}]: {text[:100]}")
+                try:
+                    out = self.translator.translate(self.last_final, source, target)
+                except Exception as e:
+                    log(f"translate failed ({source}->{target}): {e}")
+                    out = self.last_final  # never lose the transcript to a missing model
+                    state.update(detail=str(e))
+                publish_subtitle(out)
                 self.last_final = ""
                 self.last_original = ""
                 if self.transcriber._model is not None:
