@@ -19,6 +19,8 @@ commands:
   original [on|off] show the untranslated line above the translation
   speed <profile>   battery | balanced | turbo (CPU spent for lower latency)
   opacity <0.2-1.0> subtitle overlay opacity
+  capture <target>  system | si<N> (app id from the apps command)
+  apps              list apps currently playing sound (capture targets)
   status            print state as JSON
 """
 
@@ -80,6 +82,26 @@ def main() -> int:
     if cmd == "speed":
         if len(args) < 2 or args[1] not in SPEEDS:
             print("speed profiles: " + " ".join(SPEEDS), file=sys.stderr)
+            return 2
+        send(" ".join(args))
+        return 0
+    if cmd == "apps":
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+        try:
+            from livesubtitles.service import list_audio_apps
+        except Exception as e:
+            print(f"livesubtitles: {e}", file=sys.stderr)
+            return 1
+        apps = list_audio_apps()
+        if not apps:
+            print("no apps playing audio right now")
+        for a in apps:
+            print(f"{a['id']}\t{a['name']}")
+        return 0
+    if cmd == "capture":
+        if len(args) < 2 or not (args[1] == "system" or args[1].startswith("si")):
+            print("usage: livesubtitles-cli capture system|si<N> "
+                  "(see: livesubtitles-cli apps)", file=sys.stderr)
             return 2
         send(" ".join(args))
         return 0

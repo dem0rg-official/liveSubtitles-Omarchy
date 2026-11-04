@@ -102,6 +102,7 @@ class State:
             "ttl_base": SUBTITLE_TTL,
             "ttl_per_char": TTL_PER_CHAR,
             "ttl_max": TTL_MAX,
+            "capture": "system",
             "pid": os.getpid(),
         }
         self._flush()
@@ -153,6 +154,9 @@ def load_config() -> dict:
         "show_original": bool(raw.get("show_original", False)),
         "speed": speed if speed in SPEED_PROFILES else "balanced",
         "opacity": min(1.0, max(0.2, float(raw.get("opacity", 1.0)))),
+        # What audio to capture: "system" (everything) or "si<N>" — one app's
+        # playback stream, picked from the settings popup.
+        "capture": str(raw.get("capture", "system")),
     }
 
 
@@ -165,6 +169,7 @@ def save_config(cfg: dict) -> None:
             "show_original": cfg["show_original"],
             "speed": cfg["speed"],
             "opacity": cfg["opacity"],
+            "capture": cfg["capture"],
         },
         indent=2,
     ))
@@ -195,6 +200,83 @@ def resolve_monitor_source() -> str | None:
         return None
 
 
+def list_audio_apps() -> list[dict]:
+    """Apps currently playing sound (sink-inputs), deduped by app name."""
+    apps: dict[str, dict] = {}
+    try:
+        out = subprocess.run(
+            ["pactl", "list", "sink-inputs"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    idx = None
+    for line in out.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("Sink Input #"):
+            idx = stripped.split("#", 1)[1]
+        elif idx is not None and stripped.startswith("application.name ="):
+            name = stripped.split("=", 1)[1].strip().strip('"')
+            if name and all(a["name"] != name for a in apps.values()):
+                apps[f"si{idx}"] = {"id": f"si{idx}", "name": name}
+    return list(apps.values())
+
+
+LS_SINK = "livesubtitles_virtual"
+
+def ensure_app_sink() -> str | None:
+    """A dedicated null sink whose monitor carries only the selected app.
+
+    The selected sink-input is moved to this sink; PipeWire routes the null
+    sink's output to the default sink automatically, so the user still hears
+    the app. Capturing the null sink's monitor gives clean per-app audio.
+    """
+    try:
+        out = subprocess.run(
+            ["pactl", "list", "short", "sinks"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout
+        for line in out.splitlines():
+            if "\t" + LS_SINK in line:
+                return LS_SINK
+        subprocess.run(
+            ["pactl", "load-module", "module-null-sink",
+             f"sink_name={LS_SINK}",
+             "sink_properties=device.description=LiveSubtitles"],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+        return LS_SINK
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        log(f"null-sink setup failed: {e}")
+        return None
+
+
+def resolve_capture_source(target: str) -> str | None:
+    """PulseAudio source name for the capture target.
+
+    "system" (or empty) -> the default sink's monitor: everything audible.
+    "si<N>" -> move that sink-input to the dedicated null sink and capture
+    its monitor (only that app's audio; playback continues audibly).
+    """
+    if target in ("", "system"):
+        return resolve_monitor_source()
+    if not target.startswith("si"):
+        return None
+    sink = ensure_app_sink()
+    if sink is None:
+        return None
+    idx = target[2:]
+    try:
+        subprocess.run(
+            ["pactl", "move-sink-input", idx, sink],
+            capture_output=True, text=True, timeout=5, check=True,
+        )
+    except (OSError, subprocess.TimeoutExpired, subprocess.CalledProcessError) as e:
+        log(f"move-sink-input {idx} failed: {e}")
+        return None
+    return sink + ".monitor"
+
+
 def rms_s16(chunk: bytes) -> float:
     count = len(chunk) // 2
     if not count:
@@ -207,7 +289,8 @@ class Capture(threading.Thread):
     """Reads 100 ms frames from parec and hands utterances to the worker."""
 
     def __init__(
-        self, sink: "queue.Queue[tuple]", partial_every: int, stream_live: bool = False
+        self, sink: "queue.Queue[tuple]", partial_every: int, stream_live: bool = False,
+        target: str = "system",
     ) -> None:
         super().__init__(daemon=True, name="Capture")
         self.sink = sink
@@ -215,6 +298,7 @@ class Capture(threading.Thread):
         # stream_live: feed every 100 ms frame to the streaming engine so the
         # hypothesis updates while the person is still speaking.
         self.stream_live = stream_live
+        self.capture_target = target
         self.halt = threading.Event()
         self.proc: subprocess.Popen | None = None
         self.seen_loud = False
@@ -227,7 +311,7 @@ class Capture(threading.Thread):
 
     def run(self) -> None:
         while not self.halt.is_set():
-            source = resolve_monitor_source()
+            source = resolve_capture_source(self.capture_target)
             if source is None:
                 state.update(status="error", detail="no audio output to capture")
                 self.halt.wait(3)
@@ -595,6 +679,7 @@ class Service:
             show_original=self.cfg["show_original"],
             speed=self.cfg["speed"],
             opacity=self.cfg["opacity"],
+            capture=self.cfg.get("capture", "system"),
             detail="",
         )
         self.pipeline.start()
@@ -630,6 +715,7 @@ class Service:
             return
         with self.cfg_lock:
             partial_every = SPEED_PROFILES[self.cfg["speed"]]["partial_every"]
+            capture_target = self.cfg.get("capture", "system")
         stream_live = self.pipeline.use_streaming()
         if stream_live:
             log("streaming engine active — live hypothesis while speaking")
@@ -637,7 +723,9 @@ class Service:
         # across sessions turned Russian speech into English hallucinations.
         self.pipeline.transcriber.reset_language()
         self.pipeline.streaming.reset()
-        self.capture = Capture(self.pipeline.queue, partial_every, stream_live)
+        self.capture = Capture(
+            self.pipeline.queue, partial_every, stream_live, capture_target
+        )
         self.capture.start()
 
     def stop_capture(self) -> None:
@@ -720,6 +808,22 @@ class Service:
         state.update(opacity=value)
         log(f"opacity={value:.2f}")
 
+    def set_capture(self, target: str | None) -> None:
+        """Capture target: "system" or "si<N>" (a single app's stream)."""
+        target = target or "system"
+        if target != "system" and not target.startswith("si"):
+            log(f"unknown capture target: {target}")
+            return
+        with self.cfg_lock:
+            self.cfg["capture"] = target
+            save_config(self.cfg)
+        state.update(capture=target)
+        log(f"capture target={target}")
+        # Re-open parec on the new source immediately.
+        if self.cfg["enabled"]:
+            self.stop_capture()
+            self.start_capture()
+
     def set_source(self, source: str) -> None:
         with self.cfg_lock:
             if source != "auto" and source not in LANGUAGES:
@@ -749,6 +853,8 @@ class Service:
             self.set_speed(arg or "balanced")
         elif cmd == "opacity":
             self.set_opacity(arg)
+        elif cmd == "capture":
+            self.set_capture(arg)
         elif cmd == "status":
             log(f"status: {json.dumps(state.get(), ensure_ascii=False)}")
         else:

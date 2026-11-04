@@ -28,6 +28,8 @@ BarWidget {
   property bool showOriginal: false
   property string speed: "balanced"
   property real opacitySetting: 1.0
+  property string capture: "system" // "system" | "si<N>"
+  property var audioApps: []        // [{id, name}] from `livesubtitles-cli apps`
   // True between a slider move and the service echoing the new value back in
   // state.json. state.json is rewritten on every transcription, and each
   // reload would otherwise reset the slider to the stale value before the
@@ -65,6 +67,16 @@ BarWidget {
     return code
   }
 
+  function captureLabel(target) {
+    if (target === "system") return "Whole system"
+    for (var i = 0; i < audioApps.length; i++)
+      if (audioApps[i].id === target) return audioApps[i].name
+    return target
+  }
+
+  // Refresh the app list each time the popup opens (apps come and go).
+  onPopupOpenChanged: if (popupOpen) { appsProc.running = false; appsProc.running = true }
+
   function applyState(raw) {
     try {
       var p = JSON.parse(raw || "{}")
@@ -74,6 +86,7 @@ BarWidget {
       root.language = String(p.language || root.language)
       root.showOriginal = p.show_original === true
       root.speed = String(p.speed || "balanced")
+      root.capture = String(p.capture || "system")
       var op = Number(p.opacity)
       var applied = isFinite(op) && op > 0 ? Math.min(1.0, Math.max(0.2, op)) : 1.0
       // Ignore service echoes while a local edit is in flight (see opacityPending).
@@ -177,7 +190,7 @@ BarWidget {
         text: {
           if (root.status === "error") return "Error: " + root.detail
           if (root.busy) return "Loading speech model…"
-          if (root.enabled) return "Listening to system audio → " + root.languageLabel(root.language)
+          if (root.enabled) return "Listening to " + (root.capture === "system" ? "system audio" : root.captureLabel(root.capture)) + " → " + root.languageLabel(root.language)
           return "Off. Click the switch below or the LS button."
         }
         color: Color.muted
@@ -210,6 +223,24 @@ BarWidget {
           for (var i = 0; i < root.speedLabels.length; i++)
             if (root.speedLabels[i] === label) {
               root.runCli(["speed", codes[i]])
+              return
+            }
+        }
+      }
+
+      Dropdown {
+        width: parent.width
+        label: "Capture audio from"
+        options: ["Whole system"].concat(root.audioApps.map(function(a) { return a.name }))
+        value: root.captureLabel(root.capture)
+        onChanged: function(label) {
+          if (label === "Whole system") {
+            root.runCli(["capture", "system"])
+            return
+          }
+          for (var i = 0; i < root.audioApps.length; i++)
+            if (root.audioApps[i].name === label) {
+              root.runCli(["capture", root.audioApps[i].id])
               return
             }
         }
@@ -256,6 +287,23 @@ BarWidget {
         description: "Capture system audio and show translated subtitles"
         checked: root.enabled
         onClicked: root.runCli(["toggle"])
+      }
+    }
+  }
+
+  Process {
+    id: appsProc
+    command: ["livesubtitles-cli", "apps"]
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var list = []
+        var lines = this.text.trim().split("\n")
+        for (var i = 0; i < lines.length; i++) {
+          var parts = lines[i].split("\t")
+          if (parts.length === 2 && parts[0].indexOf("si") === 0)
+            list.push({ id: parts[0], name: parts[1] })
+        }
+        root.audioApps = list
       }
     }
   }
