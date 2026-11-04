@@ -45,6 +45,8 @@ MAX_UTTERANCE_FRAMES = 80  # hard cap, 8 s — longer speech becomes sequential 
 PARTIAL_EVERY_FRAMES = 10  # default refresh cadence, overridden by speed profile
 SUBTITLE_TTL = 4.0  # hide the line after this many seconds without updates
 MAX_LINES = 2
+MAX_LINE_CHARS = 160  # bound the overlay: keep only the tail of a long run
+MAX_LINE_CHARS = 160  # bound the overlay: keep only the tail of a long run
 
 # Speed profiles: how much CPU is traded for lower latency. "beam" is the
 # whisper beam size (1 = greedy, 2-3 = better accuracy on noisy audio) and
@@ -119,6 +121,16 @@ def publish_subtitle(text: str) -> None:
     last_subtitle_at = time.monotonic()
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     atomic_write(SUBTITLE_FILE, "\n".join(lines[-MAX_LINES:]))
+
+
+def _tail(text: str, limit: int = MAX_LINE_CHARS) -> str:
+    """Keep only the last `limit` chars of an ever-growing line."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[len(text) - limit :]
+    # Don't start mid-word: drop the partial word at the cut.
+    return cut[cut.find(" ") + 1 :].strip() if " " in cut else cut
 
 
 def publish_original(text: str) -> None:
@@ -511,6 +523,16 @@ class Pipeline(threading.Thread):
     def use_streaming(self) -> bool:
         return self.streaming.available()
 
+    def _publish_live(self, original: str, target: str, source: str) -> None:
+        """Publish the live streaming hypothesis: original immediately,
+        translation off-thread (Argos on every 100 ms tick would burn CPU)."""
+        original = _tail(original)
+        publish_original(original)
+        now = time.monotonic()
+        if now - self._last_tr < STREAM_TRANSLATE_EVERY:
+            return
+        self._last_tr = now
+        self.tr_worker.submit(original, source, target)
 
     def run(self) -> None:
         while True:
@@ -578,19 +600,20 @@ class Pipeline(threading.Thread):
                     continue
                 source = forced or detected
                 # Original goes out first — no translation step on its path.
-                publish_original((self.last_original + text).strip())
-                self.last_original = (self.last_original + text).strip() + " "
+                # Long runs (credit rolls, songs) grow without bound: keep
+                # only the tail so the overlay stays readable.
+                self.last_original = _tail((self.last_original + text).strip())
+                publish_original(self.last_original)
                 if partial:
                     # Interim line: confirmed words + the fresh tail. The
                     # accumulated text is now "final" — the next partial
                     # appends to it, nothing is ever re-transcribed.
-                    self.last_final = (self.last_final + text).strip() + " "
-                    self.tr_worker.submit(self.last_final.strip(), source, target)
+                    self.last_final = _tail((self.last_final + text).strip())
+                    self.tr_worker.submit(self.last_final, source, target)
                     continue
                 # Pause confirmed the tail: the accumulated line is complete.
-                line = self.last_final.strip()
-                log(f"heard[{source}]: {line[:100]}")
-                self.tr_worker.submit(line, source, target)
+                log(f"heard[{source}]: {self.last_final[:100]}")
+                self.tr_worker.submit(self.last_final, source, target)
                 self.last_final = ""
                 self.last_original = ""
                 if self.transcriber._model is not None:
