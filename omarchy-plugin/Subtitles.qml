@@ -202,6 +202,9 @@ Item {
 
             Text {
               id: originalLabel
+              // A Column does NOT center children horizontally — each line
+              // must position itself inside the widest-line box by hand.
+              x: (column.width - width) / 2
               visible: root.originalVisible
               textFormat: Text.PlainText
               text: root.original
@@ -217,6 +220,7 @@ Item {
 
             Text {
               id: label
+              x: (column.width - width) / 2
               textFormat: Text.PlainText
               text: root.subtitle
               color: Color.notifications.text
