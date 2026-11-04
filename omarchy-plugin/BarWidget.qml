@@ -137,7 +137,7 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "" // Nerd Font closed-captioning icon
+    text: "" // Nerd Font material closed-caption (U+F194, in JetBrainsMono NF)
     tooltipText: root.tooltip
     active: root.enabled
     dimmed: root.status === "error"
