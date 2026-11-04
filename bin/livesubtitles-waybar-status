@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Waybar-style status JSON for the Omarchy bar "command" module.
+# Prints {"text": "LS", "tooltip": ..., "class": off|on|loading|error}.
+set -euo pipefail
+
+STATE="$HOME/.local/share/livesubtitles/state.json"
+
+if [[ ! -f "$STATE" ]]; then
+  printf '{"text":"LS","tooltip":"Live Subtitles — service not running","class":"off"}\n'
+  exit 0
+fi
+
+jq -c --arg text "LS" '
+  {
+    text: $text,
+    tooltip: ("Live Subtitles — " + (.status // "off")
+              + (if .detail and .detail != "" then " (" + .detail + ")" else "" end)
+              + "\nClick: toggle · Right click: settings"),
+    class: (.status // "off")
+  }' "$STATE"

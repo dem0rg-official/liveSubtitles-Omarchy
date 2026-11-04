@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Runtime state (models, state.json, FIFO live here too in the default layout)
+*.onnx
+*.tmp
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

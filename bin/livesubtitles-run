@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Run the Live Subtitles service or CLI inside the project venv.
+# Usage: livesubtitles-run service|cli [args...]
+set -euo pipefail
+
+VENV="${LS_VENV:-$HOME/.local/share/livesubtitles/venv}"
+BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "livesubtitles: venv missing at $VENV — run install.sh first" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  service) shift; exec "$VENV/bin/python" "$BASE/livesubtitles/service.py" "$@" ;;
+  cli) shift; exec "$VENV/bin/python" "$BASE/livesubtitles/cli.py" "$@" ;;
+  *) echo "usage: livesubtitles-run service|cli [args...]" >&2; exit 2 ;;
+esac

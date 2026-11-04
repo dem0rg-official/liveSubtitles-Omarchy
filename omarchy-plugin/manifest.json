@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "dem0rg.livesubtitles",
+  "name": "Live Subtitles",
+  "version": "1.0.0",
+  "author": "dem0rg",
+  "license": "MIT",
+  "description": "Offline live subtitles: captures system audio, transcribes with faster-whisper and translates with Argos Translate.",
+  "kinds": [
+    "bar-widget",
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "panel": "Subtitles.qml"
+  },
+  "barWidget": {
+    "displayName": "Live Subtitles",
+    "description": "LS toggle for offline system-audio subtitles; left click toggles, right click opens settings.",
+    "category": "Accessibility",
+    "aliases": [
+      "subtitles",
+      "ls",
+      "translate"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "panel": {
+    "displayName": "Subtitle overlay",
+    "description": "Bottom-of-screen subtitle layer fed by the Live Subtitles service."
+  }
+}
